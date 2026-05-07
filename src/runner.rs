@@ -47,7 +47,7 @@ pub fn run_pipeline(
     root_dir: &std::path::Path,
     caching: CachingMode,
 ) -> Result<PipelineResult> {
-    let config = AnalysisConfig::new(crate::pyrefly::sys_info::SysInfo::lg_default());
+    let config = AnalysisConfig::new(crate::pyrefly::sys_info::SysInfo::lg_default(), None);
 
     let sources = time("Building sources", || {
         Sources::new(src_map, root_dir.to_path_buf())

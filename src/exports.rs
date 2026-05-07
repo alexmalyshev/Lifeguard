@@ -312,7 +312,7 @@ impl<'a> ExportsBuilder<'a> {
     }
 
     pub fn build(mut self, parsed_module: &ParsedModule) -> Exports {
-        let config = AnalysisConfig::new(*self.sys_info);
+        let config = AnalysisConfig::new(*self.sys_info, None);
         let definitions = Definitions::new(
             &parsed_module.ast.body,
             self.module_name,
