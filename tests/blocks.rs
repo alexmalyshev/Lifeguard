@@ -194,4 +194,124 @@ f()
             vec![("test.f", vec!["foo"])],
         );
     }
+
+    #[test]
+    fn test_name_main_guard_pruned() {
+        let code = r#"
+from foo import f
+if __name__ == '__main__':
+    f()
+"#;
+        check_effects_not_main(code);
+    }
+
+    #[test]
+    fn test_name_main_guard_reversed() {
+        let code = r#"
+from foo import f
+if '__main__' == __name__:
+    f()
+"#;
+        check_effects_not_main(code);
+    }
+
+    #[test]
+    fn test_name_main_guard_double_quotes() {
+        let code = r#"
+from foo import f
+if __name__ == "__main__":
+    f()
+"#;
+        check_effects_not_main(code);
+    }
+
+    #[test]
+    fn test_name_main_guard_else_analyzed() {
+        let code = r#"
+from foo import f
+if __name__ == '__main__':
+    f()
+else:
+    f()  # E: imported-function-call
+"#;
+        check_effects_not_main(code);
+    }
+
+    #[test]
+    fn test_name_main_guard_not_eq_not_pruned() {
+        let code = r#"
+from foo import f
+if __name__ != '__main__':
+    f()  # E: imported-function-call
+"#;
+        check_effects(code);
+    }
+
+    #[test]
+    fn test_name_main_guard_with_other_code() {
+        let code = r#"
+from foo import f
+f()  # E: imported-function-call
+if __name__ == '__main__':
+    f()
+"#;
+        check_effects_not_main(code);
+    }
+
+    #[test]
+    fn test_main_module_guard_not_pruned() {
+        let code = r#"
+from foo import f
+if __name__ == '__main__':
+    f()  # E: imported-function-call
+"#;
+        check_effects_as_main(code);
+    }
+
+    #[test]
+    fn test_main_module_else_pruned() {
+        let code = r#"
+from foo import f
+if __name__ == '__main__':
+    f()  # E: imported-function-call
+else:
+    f()
+"#;
+        check_effects_as_main(code);
+    }
+
+    #[test]
+    fn test_main_module_elif_pruned() {
+        let code = r#"
+from foo import f, g
+if __name__ == '__main__':
+    f()  # E: imported-function-call
+elif g():
+    f()
+else:
+    f()
+"#;
+        check_effects_as_main(code);
+    }
+
+    #[test]
+    fn test_main_module_other_code_still_analyzed() {
+        let code = r#"
+from foo import f
+f()  # E: imported-function-call
+if __name__ == '__main__':
+    f()  # E: imported-function-call
+"#;
+        check_effects_as_main(code);
+    }
+
+    #[test]
+    fn test_non_main_module_guard_still_pruned() {
+        let code = r#"
+from foo import f
+if __name__ == '__main__':
+    f()
+"#;
+        check_effects_not_main(code);
+    }
 }

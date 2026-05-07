@@ -123,7 +123,11 @@ impl<'a> StubAnalyzer<'a> {
     }
 
     fn if_(&mut self, x: &StmtIf, output: &mut ModuleEffects) {
-        for (_, body) in self.info.config.sys_info.pruned_if_branches(x) {
+        for (_, body) in self
+            .info
+            .config
+            .lg_pruned_if_branches(x, self.info.module_name)
+        {
             self.stmts(body, output);
         }
     }

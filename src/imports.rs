@@ -304,7 +304,7 @@ impl<'a> ModuleImportCollector<'a> {
     }
 
     fn if_(&mut self, s: &StmtIf) {
-        for (_, body) in self.config.sys_info.pruned_if_branches(s) {
+        for (_, body) in self.config.lg_pruned_if_branches(s, self.module) {
             self.stmts(body);
         }
     }

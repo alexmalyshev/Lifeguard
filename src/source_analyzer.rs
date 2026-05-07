@@ -1076,7 +1076,11 @@ impl<'a> SourceAnalyzer<'a> {
     }
 
     fn if_(&mut self, x: &StmtIf, output: &mut ModuleEffects) {
-        for (test, body) in self.info.config.sys_info.pruned_if_branches(x) {
+        for (test, body) in self
+            .info
+            .config
+            .lg_pruned_if_branches(x, self.info.module_name)
+        {
             if let Some(test) = test {
                 self.expr(test, output);
             }

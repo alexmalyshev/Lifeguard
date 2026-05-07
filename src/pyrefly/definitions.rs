@@ -722,7 +722,7 @@ impl<'a> DefinitionsBuilder<'a> {
             }
             Stmt::If(x) => {
                 self.named_in_expr(&x.test);
-                for (_, body) in self.config.sys_info.pruned_if_branches(x) {
+                for (_, body) in self.config.lg_pruned_if_branches(x, self.module_name) {
                     self.stmts(body);
                 }
                 return; // We went through the relevant branches already

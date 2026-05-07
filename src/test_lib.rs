@@ -232,7 +232,15 @@ fn check_output(
     check: Check,
     implicit_imports: Option<Vec<(&str, Vec<&str>)>>,
 ) {
-    let config = AnalysisConfig::default();
+    check_output_with_config(modules, check, implicit_imports, AnalysisConfig::default());
+}
+
+fn check_output_with_config(
+    modules: Vec<(&str, &str)>,
+    check: Check,
+    implicit_imports: Option<Vec<(&str, Vec<&str>)>>,
+    config: AnalysisConfig,
+) {
     let sources = TestSources::new(&modules);
     let (import_graph, exports) = ImportGraph::make_with_exports(&sources, &config);
 
@@ -324,6 +332,22 @@ pub fn check_errors_and_implicit_imports(
 
 pub fn check_effects(code: &str) {
     check_output(vec![("test", code)], Check::Effects, None);
+}
+
+pub fn check_effects_as_main(code: &str) {
+    let config = AnalysisConfig {
+        main_module: Some(ModuleName::from_str("test")),
+        ..AnalysisConfig::default()
+    };
+    check_output_with_config(vec![("test", code)], Check::Effects, None, config);
+}
+
+pub fn check_effects_not_main(code: &str) {
+    let config = AnalysisConfig {
+        main_module: Some(ModuleName::from_str("__other__")),
+        ..AnalysisConfig::default()
+    };
+    check_output_with_config(vec![("test", code)], Check::Effects, None, config);
 }
 
 pub fn check_all_effects(modules: Vec<(&str, &str)>) {

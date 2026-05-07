@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use pyrefly_python::module_name::ModuleName;
 
+use crate::cache::LibraryCache;
 use crate::config::AnalysisConfig;
 use crate::debug::report_memory;
 use crate::imports::ImportGraph;
