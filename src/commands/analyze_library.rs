@@ -89,7 +89,7 @@ pub fn run(args: AnalyzeLibraryArgs) -> Result<()> {
     } else {
         let root_dir = detect_root_dir(&src_map)?;
 
-        let result = run_pipeline(&src_map, &root_dir, CachingMode::Enabled)?;
+        let result = run_pipeline(&src_map, &root_dir, CachingMode::Enabled, None)?;
 
         time("Building cache", || {
             LibraryCache::build(

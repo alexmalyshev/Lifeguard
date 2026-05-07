@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::ArgAction;
 use clap::Parser;
+use pyrefly_python::module_name::ModuleName;
 
 use crate::find_sources::build_source_db;
 use crate::find_sources::make_source_map;
@@ -41,6 +42,10 @@ pub struct RunTreeArgs {
     /// Sort output keys and values for deterministic results
     #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
     sorted_output: bool,
+
+    /// Name of the main module (the module run as __main__)
+    #[arg(long = "main-module")]
+    main_module: Option<String>,
 }
 
 pub fn run(args: RunTreeArgs) -> Result<()> {
@@ -57,6 +62,7 @@ pub fn run(args: RunTreeArgs) -> Result<()> {
     let options = Options {
         verbose_output_path: args.verbose_output_path,
         sorted_output: args.sorted_output,
+        main_module: args.main_module.map(|s| ModuleName::from_str(&s)),
     };
 
     let lifeguard_output = process_source_map(&source_map, &cwd, &options)?;

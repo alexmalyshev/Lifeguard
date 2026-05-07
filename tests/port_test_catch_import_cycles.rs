@@ -23,6 +23,7 @@ mod tests {
         Options {
             verbose_output_path: Some(std::path::PathBuf::from("/tmp/test_cycles")),
             sorted_output: true,
+            main_module: None,
         }
     }
 

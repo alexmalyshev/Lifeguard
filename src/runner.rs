@@ -11,6 +11,7 @@ use std::io::BufWriter;
 use std::path::PathBuf;
 
 use anyhow::Result;
+use pyrefly_python::module_name::ModuleName;
 
 use crate::config::AnalysisConfig;
 use crate::debug::report_memory;
@@ -29,6 +30,7 @@ use crate::traits::SysInfoExt;
 pub struct Options {
     pub verbose_output_path: Option<PathBuf>,
     pub sorted_output: bool,
+    pub main_module: Option<ModuleName>,
 }
 
 /// Intermediate results from the analysis pipeline, before final output generation.
@@ -46,8 +48,9 @@ pub fn run_pipeline(
     src_map: &SourceMap,
     root_dir: &std::path::Path,
     caching: CachingMode,
+    main_module: Option<ModuleName>,
 ) -> Result<PipelineResult> {
-    let config = AnalysisConfig::new(crate::pyrefly::sys_info::SysInfo::lg_default(), None);
+    let config = AnalysisConfig::new(crate::pyrefly::sys_info::SysInfo::lg_default(), main_module);
 
     let sources = time("Building sources", || {
         Sources::new(src_map, root_dir.to_path_buf())
@@ -89,7 +92,12 @@ pub fn process_source_map(
     root_dir: &std::path::Path,
     options: &Options,
 ) -> Result<LifeGuardAnalysis> {
-    let result = run_pipeline(src_map, root_dir, CachingMode::Disabled)?;
+    let result = run_pipeline(
+        src_map,
+        root_dir,
+        CachingMode::Disabled,
+        options.main_module,
+    )?;
     let PipelineResult {
         sources,
         safety_map,

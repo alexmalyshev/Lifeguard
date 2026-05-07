@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::ArgAction;
 use clap::Parser;
+use pyrefly_python::module_name::ModuleName;
 use tracing::info;
 
 use crate::debug::report_peak_memory;
@@ -50,6 +51,10 @@ pub struct AnalyzeArgs {
     /// Sort output keys and values for deterministic results
     #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
     pub sorted_output: bool,
+
+    /// Name of the main module (the module run as __main__)
+    #[arg(long = "main-module")]
+    pub main_module: Option<String>,
 }
 
 pub fn run(args: AnalyzeArgs) -> Result<()> {
@@ -76,6 +81,7 @@ pub fn run(args: AnalyzeArgs) -> Result<()> {
     let options = Options {
         verbose_output_path: args.verbose_output_path,
         sorted_output: args.sorted_output,
+        main_module: args.main_module.map(|s| ModuleName::from_str(&s)),
     };
 
     let lifeguard_output = process_source_map(&src_map, &root_dir, &options)?;
