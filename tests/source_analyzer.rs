@@ -208,7 +208,7 @@ bar.baz  # Should add foo.bar.baz as a called import
         check_imports(
             out,
             vec![("test", vec!["foo", "foo.bar", "foo.bar.baz"])],
-            vec![("test", vec!["foo.bar.baz"])],
+            vec![("test", vec!["foo", "foo.bar.baz"])],
         );
     }
 
@@ -223,7 +223,7 @@ b.baz  # Should add foo.bar.baz as a called import
         check_imports(
             out,
             vec![("test", vec!["foo", "foo.bar", "foo.bar.baz"])],
-            vec![("test", vec!["foo.bar.baz"])],
+            vec![("test", vec!["foo", "foo.bar.baz"])],
         );
     }
 
@@ -243,7 +243,53 @@ bar.baz.quux  # Should add foo.bar.baz and foo.bar.baz.quux as called imports
                 "test",
                 vec!["foo", "foo.bar", "foo.bar.baz", "foo.bar.baz.quux"],
             )],
-            vec![("test", vec!["foo.bar.baz", "foo.bar.baz.quux"])],
+            vec![("test", vec!["foo", "foo.bar.baz", "foo.bar.baz.quux"])],
+        );
+    }
+
+    #[test]
+    fn test_from_import_bare_name_reference() {
+        let code = r#"
+from foo import bar
+bar
+        "#;
+        let out = run_analysis(code);
+        let called = out.called_imports.get(&ModuleName::from_str("test"));
+        assert!(called.is_some(), "Expected called imports for test scope");
+        let called_set = called.unwrap();
+        assert!(
+            called_set.contains(&ModuleName::from_str("foo")),
+            "Expected foo in called imports for `from foo import bar; bar`"
+        );
+    }
+
+    #[test]
+    fn test_from_import_bare_name_with_alias() {
+        let code = r#"
+from foo import bar as baz
+baz
+        "#;
+        let out = run_analysis(code);
+        let called = out.called_imports.get(&ModuleName::from_str("test"));
+        assert!(called.is_some(), "Expected called imports for test scope");
+        let called_set = called.unwrap();
+        assert!(
+            called_set.contains(&ModuleName::from_str("foo")),
+            "Expected foo in called imports for `from foo import bar as baz; baz`"
+        );
+    }
+
+    #[test]
+    fn test_import_dotted_bare_name_reference() {
+        let code = r#"
+import foo.bar
+foo
+        "#;
+        let out = run_analysis(code);
+        check_imports(
+            out,
+            vec![("test", vec!["foo.bar"])],
+            vec![("test", vec!["foo.bar"])],
         );
     }
 

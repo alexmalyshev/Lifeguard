@@ -17,7 +17,6 @@ use ruff_python_ast::ExprCall;
 use ruff_python_ast::ExprCompare;
 use ruff_python_ast::ExprContext;
 use ruff_python_ast::ExprLambda;
-use ruff_python_ast::ExprName;
 use ruff_python_ast::ExprSubscript;
 use ruff_python_ast::Identifier;
 use ruff_python_ast::Stmt;
@@ -800,10 +799,32 @@ impl<'a> SourceAnalyzer<'a> {
         }
     }
 
-    fn check_name(&self, e: &ExprName, output: &mut ModuleEffects) {
+    fn check_name(&self, x: &Expr, output: &mut ModuleEffects) {
+        let Expr::Name(e) = x else { return };
         let name = ModuleName::from_name(&e.id);
         if output.all_pending_import_names.contains(&name) {
             output.add_called_import(name, &self.cursor.scope());
+            return;
+        }
+
+        let Some(res) = self.info.resolve(&self.cursor, x) else {
+            return;
+        };
+        if !res.is_import() {
+            return;
+        }
+
+        let scope = self.cursor.scope();
+        match &res.definition.style {
+            DefinitionStyle::ImportModule(module) => {
+                output.add_called_import(*module, &scope);
+            }
+            DefinitionStyle::Import(parent)
+            | DefinitionStyle::ImportAsEq(parent)
+            | DefinitionStyle::ImportAs(parent, _) => {
+                output.add_called_import(*parent, &scope);
+            }
+            _ => {}
         }
     }
 
@@ -817,7 +838,7 @@ impl<'a> SourceAnalyzer<'a> {
             Expr::Attribute(e) => self.check_attr(e, output),
             Expr::Subscript(e) => self.check_subscript(e, output),
             Expr::Compare(e) => self.check_compare(e, output),
-            Expr::Name(e) => self.check_name(e, output),
+            Expr::Name(_) => self.check_name(x, output),
             _ => (),
         }
         x.recurse(&mut |c| self.expr(c, output));
