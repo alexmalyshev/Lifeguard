@@ -84,4 +84,56 @@ mod tests {
         "#;
         check(code);
     }
+
+    #[test]
+    fn test_eval_one_scope() {
+        let code = r#"
+            d = {'x': 2}
+            y = eval('x', d)
+        "#;
+        check(code);
+    }
+
+    #[test]
+    fn test_eval_two_scopes() {
+        let code = r#"
+            d1 = {'x': 0}
+            d2 = {'x': 3}
+            y = eval('x', d1, d2)
+        "#;
+        check(code);
+    }
+
+    #[test]
+    fn test_eval_default_globals_and_locals() {
+        let code = r#"
+            w = eval('42')
+        "#;
+        check(code);
+    }
+
+    #[test]
+    fn test_eval_import_raises_exception() {
+        let code = r#"
+            code_str = 'import x'
+            eval(code_str, {}) # E: exec-call
+        "#;
+        check(code);
+    }
+
+    #[test]
+    fn test_eval_assignment_raises_syntax_error() {
+        let code = r#"
+            eval('x = 1', {}) # E: exec-call
+        "#;
+        check(code);
+    }
+
+    #[test]
+    fn test_eval_multiple_expressions_raises_syntax_error() {
+        let code = r#"
+            eval('1+1; 2+2', {})
+        "#;
+        check(code);
+    }
 }

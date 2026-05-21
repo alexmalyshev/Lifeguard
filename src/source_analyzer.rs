@@ -19,6 +19,7 @@ use ruff_python_ast::ExprContext;
 use ruff_python_ast::ExprLambda;
 use ruff_python_ast::ExprSubscript;
 use ruff_python_ast::Identifier;
+use ruff_python_ast::PySourceType;
 use ruff_python_ast::Stmt;
 use ruff_python_ast::StmtAnnAssign;
 use ruff_python_ast::StmtAssign;
@@ -36,6 +37,7 @@ use ruff_python_ast::StmtTry;
 use ruff_python_ast::StmtWhile;
 use ruff_python_ast::StmtWith;
 use ruff_python_ast::name::Name;
+use ruff_python_parser::parse_unchecked_source;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
 use tracing::trace;
@@ -171,6 +173,41 @@ impl<'a> SourceAnalyzer<'a> {
                 let name = ModuleName::from_str("getattr");
                 let eff = Effect::new(EffectKind::ProhibitedFunctionCall, name, attr.range());
                 self.add_effect(eff, output);
+            }
+        }
+    }
+
+    fn check_eval(
+        &self,
+        args: Option<&Arguments>,
+        fname: ModuleName,
+        range: TextRange,
+        output: &mut ModuleEffects,
+    ) {
+        let Some(first_arg) = args.and_then(|a| a.args.first()) else {
+            return;
+        };
+        let Expr::StringLiteral(s) = first_arg else {
+            self.add_effect(Effect::new(EffectKind::ExecCall, fname, range), output);
+            return;
+        };
+        let code = s.value.to_str();
+        if code.is_empty() {
+            return;
+        }
+        let parsed = parse_unchecked_source(code, PySourceType::Python);
+        let module = parsed.into_syntax();
+        let Some(Stmt::Expr(expr_stmt)) = module.body.first() else {
+            self.add_effect(Effect::new(EffectKind::ExecCall, fname, range), output);
+            return;
+        };
+        let mut eval_effects = ModuleEffects::new();
+        self.expr(&expr_stmt.value, &mut eval_effects);
+        for (scope, effs) in eval_effects.effects.iter() {
+            for eff in effs {
+                let mut adjusted = eff.clone();
+                adjusted.range = range;
+                output.add_effect(*scope, adjusted);
             }
         }
     }
@@ -379,8 +416,10 @@ impl<'a> SourceAnalyzer<'a> {
         } else if name == "exec" {
             let eff = Effect::new(EffectKind::ExecCall, fname, func.range());
             self.add_effect(eff, output);
+        } else if name == "eval" {
+            self.check_eval(args, fname, func.range(), output);
         } else if let Some(eff) = builtins.call_effect(func) {
-            // Prohibited builtin call (e.g. eval, open)
+            // Prohibited builtin call (e.g. open, __import__)
             self.add_effect(eff, output);
         } else if builtins.is_known_builtin(func) {
             // Known safe builtin - no effect needed

@@ -313,6 +313,56 @@ print(a)  # safe
     }
 
     #[test]
+    fn test_eval_string_literal_safe() {
+        let code = r#"
+a = eval("1 + 2")
+"#;
+        check(code);
+    }
+
+    #[test]
+    fn test_eval_string_literal_unsafe() {
+        let code = r#"
+a = eval("input()") # E: prohibited-call
+"#;
+        check(code);
+    }
+
+    #[test]
+    fn test_eval_non_string() {
+        let code = r#"
+x = "something"
+eval(x) # E: exec-call
+"#;
+        check(code);
+    }
+
+    #[test]
+    fn test_eval_empty_string() {
+        let code = r#"
+eval("")
+"#;
+        check(code);
+    }
+
+    #[test]
+    fn test_eval_in_function() {
+        let code = r#"
+def f():
+    eval("input()")
+"#;
+        check(code);
+    }
+
+    #[test]
+    fn test_eval_nested_exec() {
+        let code = r#"
+eval("exec('import os')") # E: exec-call
+"#;
+        check(code);
+    }
+
+    #[test]
     fn test_bound_classmethod_ownership_unsafe() {
         // Extension of test_bound_method_ownership making the function call
         // use a prohibited call.
