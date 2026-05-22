@@ -52,6 +52,17 @@ const SAFE_FUNCTIONS_ARRAY: &[&str] = &[
     // Pure wrapper: reads __qualname__/__module__, creates an idempotent logger,
     // returns a functools.wraps closure. No I/O or state mutation at decoration time.
     "libfb.py.asyncio.decorators.retryable",
+    // Constructs SpanScope storing name + deferred tracer lambda, wraps with
+    // functools.wraps. Span is only started at call time. Explicitly designed
+    // for module-level decoration before configure() is called.
+    "tracing.span",
+    // Async equivalent of functools.lru_cache. At decoration time only copies
+    // function metadata and initializes an empty OrderedDict. No I/O or event
+    // loop interaction until the decorated function is actually called.
+    "async_lru.alru_cache",
+    // Pysa marker decorator: wraps with a trivial pass-through via functools.wraps.
+    // No registration, no global state, purely for static taint analysis.
+    "confucius.analects.base.agentic_function.agent_function",
     // Meta-decorator that wraps functions while preserving signatures. Its body
     // only mutates locally-created objects (the wrapper closure).
     "decorator.decorator",
