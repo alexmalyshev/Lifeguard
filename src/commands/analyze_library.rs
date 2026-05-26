@@ -5,6 +5,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::path::Path;
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -39,28 +40,35 @@ pub struct AnalyzeLibraryArgs {
 /// Detect the root directory by walking up from cwd until a source file resolves.
 /// Source DB paths (e.g., "fbcode/eden/fs/cli/constants.py") are relative to the
 /// repo root, which may be an ancestor of cwd.
+///
+/// Tries multiple sample paths so that one transient build-output entry whose
+/// hash doesn't match locally cannot break detection.
 fn detect_root_dir(src_map: &SourceMap) -> Result<PathBuf> {
+    const MAX_SAMPLES: usize = 32;
+
     let cwd = std::env::current_dir()?;
 
-    // Get the first real file path from the source map
-    let sample_path = src_map
+    let samples: Vec<&Path> = src_map
         .values()
-        .find_map(|v| match v {
-            SourceResult::Ok(p) => Some(p),
+        .filter_map(|v| match v {
+            SourceResult::Ok(p) => Some(p.as_path()),
             _ => None,
         })
-        .ok_or_else(|| anyhow::anyhow!("Source map has no valid file entries"))?;
+        .take(MAX_SAMPLES)
+        .collect();
+    if samples.is_empty() {
+        return Err(anyhow::anyhow!("Source map has no valid file entries"));
+    }
 
-    // Walk up from cwd until we find a directory where the path resolves
     let mut candidate = cwd.as_path();
     loop {
-        if candidate.join(sample_path).exists() {
+        if samples.iter().any(|s| candidate.join(s).exists()) {
             return Ok(candidate.to_path_buf());
         }
         candidate = candidate.parent().ok_or_else(|| {
             anyhow::anyhow!(
-                "Could not find root directory: '{}' does not resolve from any ancestor of '{}'",
-                sample_path.display(),
+                "Could not find root directory: none of {} sample paths resolve from any ancestor of '{}'",
+                samples.len(),
                 cwd.display(),
             )
         })?;
