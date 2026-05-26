@@ -345,13 +345,12 @@ impl EffectTable {
         self.table.retain(f)
     }
 
-    pub(crate) fn merge(&mut self, other: &Self) {
-        for (name, effs) in &other.table {
-            if let Some(val) = self.table.get_mut(name) {
-                val.extend(effs.iter().cloned());
-            } else {
-                self.table.insert(*name, effs.clone());
-            };
+    /// Move every entry from `other` into `self`, appending into existing
+    /// scope vectors when the key collides. Consuming `other` avoids cloning
+    /// each `Effect`.
+    pub(crate) fn merge(&mut self, other: Self) {
+        for (name, effs) in other.table {
+            self.table.entry(name).or_default().extend(effs);
         }
     }
 
@@ -533,7 +532,7 @@ mod tests {
         table2.insert(mod_a, Effect::new(EffectKind::MethodCall, mod_a, range));
         table2.insert(mod_b, Effect::new(EffectKind::Raise, mod_b, range));
 
-        table1.merge(&table2);
+        table1.merge(table2);
 
         assert_eq!(table1.get(&mod_a).unwrap().len(), 2);
         assert_eq!(table1.get(&mod_b).unwrap().len(), 1);

@@ -119,7 +119,7 @@ impl<'a> StubAnalyzer<'a> {
 
     fn function_def(&mut self, x: &StmtFunctionDef, output: &mut ModuleEffects) {
         let out = self.run_body(x);
-        output.effects.merge(&out.effects);
+        output.effects.merge(out.effects);
     }
 
     fn if_(&mut self, x: &StmtIf, output: &mut ModuleEffects) {
