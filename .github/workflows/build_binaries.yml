@@ -9,6 +9,9 @@ on:
   workflow_dispatch:
   workflow_call:
 
+permissions:
+  contents: read
+
 env:
   PACKAGE_FILE_NAME: lifeguard_lazy_imports
   BINARY_NAME: lifeguard
