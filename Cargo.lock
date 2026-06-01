@@ -1313,7 +1313,6 @@ dependencies = [
  "anyhow",
  "clap",
  "dashmap",
- "itertools 0.14.0",
  "libc",
  "lifeguard_stubs",
  "petgraph",

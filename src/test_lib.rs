@@ -12,7 +12,6 @@ use std::process::Command;
 
 use ahash::AHashMap;
 use ahash::AHashSet;
-use itertools::Itertools;
 use pyrefly_python::module::Module;
 use pyrefly_python::module_name::ModuleName;
 use rayon::prelude::*;
@@ -396,15 +395,9 @@ pub fn check_imports(
         .pending_imports
         .iter()
         .map(|(k, v)| {
-            (
-                k.clone(),
-                v.iter()
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .sorted()
-                    .collect::<Vec<_>>(),
-            )
+            let mut imports = v.iter().cloned().collect::<Vec<_>>();
+            imports.sort();
+            (k.clone(), imports)
         })
         .collect();
     expected_pending_imports.sort_by_key(|a| a.0);
@@ -413,15 +406,9 @@ pub fn check_imports(
         .called_imports
         .iter()
         .map(|(k, v)| {
-            (
-                k.clone(),
-                v.iter()
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .sorted()
-                    .collect::<Vec<_>>(),
-            )
+            let mut imports = v.iter().cloned().collect::<Vec<_>>();
+            imports.sort();
+            (k.clone(), imports)
         })
         .collect();
     expected_called_imports.sort_by_key(|a| a.0);
