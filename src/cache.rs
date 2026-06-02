@@ -251,26 +251,42 @@ impl LibraryCache {
         module_names: &AHashSet<ModuleName>,
         func_safety_by_module: &mut HashMap<ModuleName, HashMap<String, FunctionSafetyInfo>>,
     ) {
+        // Index of globally safe function names for O(1) unqualified lookups.
+        // Only include functions from modules in `module_names` to match
+        // `is_call_verified_safe`'s unqualified fallback.
+        let mut globally_safe_funcs: AHashSet<String> = func_safety_by_module
+            .iter()
+            .filter(|(module, _)| module_names.contains(module))
+            .flat_map(|(_, fs)| fs.iter())
+            .filter(|(_, info)| info.verdict == FunctionSafety::Safe)
+            .map(|(name, _)| name.clone())
+            .collect();
+
         // Promote to a fixpoint: one promotion can unblock a caller next round.
         let mut num_promoted = 0;
-        while self.promote_resolved_module_functions(module_names, func_safety_by_module) {
+        while self.promote_resolved_module_functions(
+            module_names,
+            func_safety_by_module,
+            &mut globally_safe_funcs,
+        ) {
             num_promoted += 1;
         }
         // Clear errors only as a consequence of a promotion (else stay conservative).
         if num_promoted > 0 {
-            self.clear_verified_errors(module_names, func_safety_by_module);
+            self.clear_verified_errors(module_names, func_safety_by_module, &globally_safe_funcs);
         }
         debug!("{} promotion iterations were made", num_promoted);
     }
 
     /// Promote an `UnsafeMissingDep` verdict to `Safe` only when every callee
-    /// that caused it now resolves to a `Safe` function. A function whose
-    /// missing dep resolves to an *unsafe* function stays unsafe, so transitive
-    /// callers are not wrongly cleared. Returns whether any verdict changed.
+    /// that caused it now resolves to a `Safe` function, so a missing dep that
+    /// resolves to an *unsafe* function keeps the caller unsafe. Promoted names
+    /// are recorded in `globally_safe_funcs`. Returns whether any verdict changed.
     fn promote_resolved_module_functions(
         &self,
         module_names: &AHashSet<ModuleName>,
         func_safety_by_module: &mut HashMap<ModuleName, HashMap<String, FunctionSafetyInfo>>,
+        globally_safe_funcs: &mut AHashSet<String>,
     ) -> bool {
         let mut to_promote: Vec<(ModuleName, String)> = Vec::new();
         for module in &self.modules {
@@ -291,22 +307,32 @@ impl LibraryCache {
                 .and_then(|fs| fs.get_mut(&func_name))
             {
                 info.verdict = FunctionSafety::Safe;
+                globally_safe_funcs.insert(func_name);
             }
         }
         promoted
     }
 
-    /// Drop errors that the current per-function verdicts now verify as safe.
+    /// Drop errors that the current per-function verdicts now verify as safe,
+    /// using the global safe-function index for O(1) unqualified lookups.
     /// Returns whether any error was removed.
     fn clear_verified_errors(
         &mut self,
         module_names: &AHashSet<ModuleName>,
         func_safety_by_module: &HashMap<ModuleName, HashMap<String, FunctionSafetyInfo>>,
+        globally_safe_funcs: &AHashSet<String>,
     ) -> bool {
         let mut cleared = false;
         for module in &mut self.modules {
             if let CachedSafety::Ok(ref mut safety) = module.safety {
-                cleared |= retain_unverified_errors(safety, module_names, func_safety_by_module);
+                cleared |= retain_unverified_errors(safety, |func_name| {
+                    is_call_verified_safe_indexed(
+                        func_name,
+                        module_names,
+                        func_safety_by_module,
+                        globally_safe_funcs,
+                    )
+                });
             }
         }
         cleared
@@ -358,7 +384,9 @@ impl LibraryCache {
             module.missing_imports = still_missing;
 
             if let CachedSafety::Ok(ref mut safety) = module.safety {
-                retain_unverified_errors(safety, &resolved_modules, &func_safety_by_module);
+                retain_unverified_errors(safety, |func_name| {
+                    is_call_verified_safe(func_name, &resolved_modules, &func_safety_by_module)
+                });
             }
         }
 
@@ -457,12 +485,11 @@ impl LibraryCache {
     }
 }
 
-/// Drop errors on `safety` that the per-function verdicts verify as safe,
-/// considering only calls into `modules`. Returns whether any error was removed.
+/// Drop errors on `safety` that `is_verified_safe` confirms are safe, leaving
+/// the rest. Returns whether any error was removed.
 fn retain_unverified_errors(
     safety: &mut CachedModuleSafety,
-    modules: &AHashSet<ModuleName>,
-    func_safety_by_module: &HashMap<ModuleName, HashMap<String, FunctionSafetyInfo>>,
+    mut is_verified_safe: impl FnMut(&str) -> bool,
 ) -> bool {
     let before = safety.errors.len();
     safety.errors.retain(|e| {
@@ -473,11 +500,7 @@ fn retain_unverified_errors(
         // `SafetyError::new_from_effect`), which may render the call with a
         // trailing `()`. `function_safety` is keyed by the bare function name,
         // so strip the `()` before looking the verdict up.
-        !is_call_verified_safe(
-            e.metadata.trim_end_matches("()"),
-            modules,
-            func_safety_by_module,
-        )
+        !is_verified_safe(e.metadata.trim_end_matches("()"))
     });
     safety.errors.len() < before
 }
@@ -538,6 +561,27 @@ fn can_promote_missing_dep_function(
         && info.missing_dep_callees.iter().all(|callee| {
             is_call_verified_safe(callee.as_str(), module_names, func_safety_by_module)
         })
+}
+
+/// Like `is_call_verified_safe` but uses a pre-built index for the unqualified
+/// name fallback, turning it from O(modules) to O(1).
+fn is_call_verified_safe_indexed(
+    func_name: &str,
+    resolved_modules: &AHashSet<ModuleName>,
+    func_safety_by_module: &HashMap<ModuleName, HashMap<String, FunctionSafetyInfo>>,
+    globally_safe_funcs: &AHashSet<String>,
+) -> bool {
+    let fqn = ModuleName::from_str(func_name);
+    for (parent, dot_pos) in fqn.iter_parents() {
+        if resolved_modules.contains(&parent) {
+            let local_name = &func_name[dot_pos + 1..];
+            return func_safety_by_module
+                .get(&parent)
+                .is_some_and(|fs| lookup_in_safety_map(local_name, fs));
+        }
+    }
+
+    globally_safe_funcs.contains(func_name)
 }
 
 fn resolve_implicit_imports(
