@@ -22,6 +22,7 @@ use crate::exports::Exports;
 use crate::imports::ImportGraph;
 use crate::imports::resolve_to_known_module;
 use crate::module_safety::FunctionSafety;
+use crate::module_safety::FunctionSafetyInfo;
 use crate::module_safety::ModuleSafety;
 use crate::module_safety::SafetyResult;
 use crate::project::SafetyMap;
@@ -51,9 +52,9 @@ pub struct CachedModule {
     pub ambiguous_imports: AHashSet<ModuleName>,
     /// Module-level imports never accessed in any scope (side-effect imports).
     pub side_effect_imports: AHashSet<ModuleName>,
-    /// Per-function safety verdicts from call graph analysis.
+    /// Per-function safety info from call graph analysis.
     /// Keys are function-local names (e.g., "helper" for `mod.helper`).
-    pub function_safety: HashMap<String, FunctionSafety>,
+    pub function_safety: HashMap<String, FunctionSafetyInfo>,
 }
 
 /// Safety analysis result for a cached module.
@@ -246,7 +247,7 @@ impl LibraryCache {
     fn upgrade_missing_dep_functions(
         &mut self,
         module_names: &AHashSet<ModuleName>,
-        func_safety_by_module: &mut HashMap<ModuleName, HashMap<String, FunctionSafety>>,
+        func_safety_by_module: &mut HashMap<ModuleName, HashMap<String, FunctionSafetyInfo>>,
     ) {
         while self.promote_safe_module_functions(func_safety_by_module)
             && self.clear_verified_errors(module_names, func_safety_by_module)
@@ -257,7 +258,7 @@ impl LibraryCache {
     /// `Safe`. Returns whether any verdict changed.
     fn promote_safe_module_functions(
         &self,
-        func_safety_by_module: &mut HashMap<ModuleName, HashMap<String, FunctionSafety>>,
+        func_safety_by_module: &mut HashMap<ModuleName, HashMap<String, FunctionSafetyInfo>>,
     ) -> bool {
         let mut promoted = false;
         for module in self
@@ -268,11 +269,11 @@ impl LibraryCache {
             let Some(fs) = func_safety_by_module.get_mut(&module.name) else {
                 continue;
             };
-            for verdict in fs
+            for info in fs
                 .values_mut()
-                .filter(|v| **v == FunctionSafety::UnsafeMissingDep)
+                .filter(|info| info.verdict == FunctionSafety::UnsafeMissingDep)
             {
-                *verdict = FunctionSafety::Safe;
+                info.verdict = FunctionSafety::Safe;
                 promoted = true;
             }
         }
@@ -284,7 +285,7 @@ impl LibraryCache {
     fn clear_verified_errors(
         &mut self,
         module_names: &AHashSet<ModuleName>,
-        func_safety_by_module: &HashMap<ModuleName, HashMap<String, FunctionSafety>>,
+        func_safety_by_module: &HashMap<ModuleName, HashMap<String, FunctionSafetyInfo>>,
     ) -> bool {
         let mut cleared = false;
         for module in &mut self.modules {
@@ -303,11 +304,11 @@ impl LibraryCache {
 
         self.propagate_re_export_safety();
 
-        let mut func_safety_by_module: HashMap<ModuleName, HashMap<String, FunctionSafety>> = self
-            .modules
-            .iter_mut()
-            .map(|m| (m.name, std::mem::take(&mut m.function_safety)))
-            .collect();
+        let mut func_safety_by_module: HashMap<ModuleName, HashMap<String, FunctionSafetyInfo>> =
+            self.modules
+                .iter_mut()
+                .map(|m| (m.name, std::mem::take(&mut m.function_safety)))
+                .collect();
 
         for module in &mut self.modules {
             if let CachedSafety::Ok(ref mut safety) = module.safety {
@@ -372,7 +373,7 @@ impl LibraryCache {
                     self.modules[idx]
                         .function_safety
                         .get(&re.imported_attr)
-                        .copied()
+                        .cloned()
                 });
 
                 if let Some(safety) = source_safety {
@@ -386,7 +387,7 @@ impl LibraryCache {
                                 changed = true;
                             }
                             std::collections::hash_map::Entry::Occupied(mut e)
-                                if safety < *e.get() =>
+                                if safety.verdict < e.get().verdict =>
                             {
                                 e.insert(safety);
                                 changed = true;
@@ -445,7 +446,7 @@ impl LibraryCache {
 fn retain_unverified_errors(
     safety: &mut CachedModuleSafety,
     modules: &AHashSet<ModuleName>,
-    func_safety_by_module: &HashMap<ModuleName, HashMap<String, FunctionSafety>>,
+    func_safety_by_module: &HashMap<ModuleName, HashMap<String, FunctionSafetyInfo>>,
 ) -> bool {
     let before = safety.errors.len();
     safety.errors.retain(|e| {
@@ -476,14 +477,16 @@ fn retain_unverified_errors(
 fn is_call_verified_safe(
     func_name: &str,
     resolved_modules: &AHashSet<ModuleName>,
-    func_safety_by_module: &HashMap<ModuleName, HashMap<String, FunctionSafety>>,
+    func_safety_by_module: &HashMap<ModuleName, HashMap<String, FunctionSafetyInfo>>,
 ) -> bool {
     let fqn = ModuleName::from_str(func_name);
     for (parent, dot_pos) in fqn.iter_parents() {
         if resolved_modules.contains(&parent) {
             let local_name = &func_name[dot_pos + 1..];
             if let Some(fs) = func_safety_by_module.get(&parent) {
-                return matches!(fs.get(local_name), Some(FunctionSafety::Safe));
+                return fs
+                    .get(local_name)
+                    .is_some_and(|info| info.verdict == FunctionSafety::Safe);
             }
             return false;
         }
@@ -493,7 +496,7 @@ fn is_call_verified_safe(
         .iter()
         .filter_map(|r| func_safety_by_module.get(r))
         .filter_map(|fs| fs.get(func_name))
-        .any(|s| *s == FunctionSafety::Safe)
+        .any(|info| info.verdict == FunctionSafety::Safe)
 }
 
 fn resolve_implicit_imports(
@@ -535,13 +538,11 @@ impl CachedModule {
         self.ambiguous_imports.extend(other.ambiguous_imports);
         self.side_effect_imports.extend(other.side_effect_imports);
         self.safety.merge(other.safety);
-        for (name, safety) in other.function_safety {
+        for (name, info) in other.function_safety {
             self.function_safety
                 .entry(name)
-                .and_modify(|existing| {
-                    *existing = (*existing).max(safety);
-                })
-                .or_insert(safety);
+                .and_modify(|existing| existing.merge(info.clone()))
+                .or_insert(info);
         }
     }
 }
@@ -899,8 +900,11 @@ mod tests {
             defs_mod.function_safety.keys().collect::<Vec<_>>()
         );
         assert_eq!(
-            defs_mod.function_safety.get("Safe"),
-            Some(&FunctionSafety::Safe),
+            defs_mod
+                .function_safety
+                .get("Safe")
+                .map(|info| info.verdict),
+            Some(FunctionSafety::Safe),
         );
     }
 
@@ -1198,8 +1202,8 @@ mod tests {
             .find(|m| m.name == mn("defs"))
             .unwrap();
         assert_ne!(
-            defs_mod.function_safety.get("Foo"),
-            Some(&FunctionSafety::Safe),
+            defs_mod.function_safety.get("Foo").map(|info| info.verdict),
+            Some(FunctionSafety::Safe),
             "class Foo must not be cached as Safe when __init__ mutates module globals"
         );
 
@@ -1298,7 +1302,10 @@ mod tests {
             missing_imports: AHashSet::new(),
             ambiguous_imports: AHashSet::new(),
             side_effect_imports: AHashSet::new(),
-            function_safety: HashMap::from([("foo".to_string(), FunctionSafety::Safe)]),
+            function_safety: HashMap::from([(
+                "foo".to_string(),
+                FunctionSafetyInfo::new(FunctionSafety::Safe),
+            )]),
         });
 
         // Module B re-exports `foo` from C, but already has it as UnsafeMissingDep
@@ -1309,7 +1316,10 @@ mod tests {
             missing_imports: AHashSet::new(),
             ambiguous_imports: AHashSet::new(),
             side_effect_imports: AHashSet::new(),
-            function_safety: HashMap::from([("foo".to_string(), FunctionSafety::UnsafeMissingDep)]),
+            function_safety: HashMap::from([(
+                "foo".to_string(),
+                FunctionSafetyInfo::new(FunctionSafety::UnsafeMissingDep),
+            )]),
         });
 
         cache.exports.re_exports.push(CachedReExport {
@@ -1323,8 +1333,8 @@ mod tests {
 
         let b = cache.modules.iter().find(|m| m.name == mn("b")).unwrap();
         assert_eq!(
-            b.function_safety.get("foo"),
-            Some(&FunctionSafety::Safe),
+            b.function_safety.get("foo").map(|info| info.verdict),
+            Some(FunctionSafety::Safe),
             "propagation should replace UnsafeMissingDep with Safe from source module"
         );
     }

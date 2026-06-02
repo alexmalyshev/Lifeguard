@@ -37,6 +37,7 @@ use crate::imports::ImportGraph;
 use crate::module_effects::ModuleImportsMap;
 use crate::module_parser::ParsedModule;
 pub use crate::module_safety::FunctionSafety;
+use crate::module_safety::FunctionSafetyInfo;
 use crate::module_safety::ModuleSafety;
 use crate::module_safety::SafetyResult;
 use crate::source_map::AstResult;
@@ -213,7 +214,7 @@ pub struct AnalysisOutput {
 // traversing the analysis map. Uses DashMap for concurrent access from multiple threads.
 struct GlobalAnalysisState {
     safety_map: SafetyMap,
-    function_safety: DashMap<ModuleName, FunctionSafety>,
+    function_safety: DashMap<ModuleName, FunctionSafetyInfo>,
 }
 
 impl GlobalAnalysisState {
@@ -244,7 +245,7 @@ impl GlobalAnalysisState {
                             let local_name = &fqn.as_str()[dot_pos + 1..];
                             module_safety
                                 .function_safety
-                                .insert(local_name.to_string(), *entry.value());
+                                .insert(local_name.to_string(), entry.value().clone());
                         }
                         break;
                     }
@@ -289,27 +290,38 @@ impl GlobalAnalysisState {
     }
 
     fn mark_safe(&self, func: &ModuleName) {
-        self.function_safety.insert(*func, FunctionSafety::Safe);
+        self.function_safety
+            .insert(*func, FunctionSafetyInfo::new(FunctionSafety::Safe));
     }
 
     fn mark_unsafe(&self, func: &ModuleName) {
-        self.function_safety.insert(*func, FunctionSafety::Unsafe);
+        self.function_safety
+            .insert(*func, FunctionSafetyInfo::new(FunctionSafety::Unsafe));
     }
 
-    fn mark_unsafe_missing_dep(&self, func: &ModuleName) {
+    fn mark_unsafe_missing_dep(&self, func: &ModuleName, callee: &ModuleName) {
         self.function_safety
-            .insert(*func, FunctionSafety::UnsafeMissingDep);
+            .entry(*func)
+            .and_modify(|info| {
+                info.verdict = info.verdict.max(FunctionSafety::UnsafeMissingDep);
+                info.missing_dep_callees.insert(*callee);
+            })
+            .or_insert_with(|| FunctionSafetyInfo::unsafe_missing_dep(*callee));
     }
 
     fn is_unsafe(&self, func: &ModuleName) -> bool {
         self.function_safety
             .get(func)
-            .is_some_and(|v| *v == FunctionSafety::Unsafe)
+            .is_some_and(|info| info.verdict == FunctionSafety::Unsafe)
     }
 
     fn mark_unsafe_if_imported(&self, func: &ModuleName) {
         self.function_safety
-            .insert(*func, FunctionSafety::UnsafeIfImported);
+            .entry(*func)
+            .and_modify(|info| {
+                info.verdict = info.verdict.max(FunctionSafety::UnsafeIfImported);
+            })
+            .or_insert_with(|| FunctionSafetyInfo::new(FunctionSafety::UnsafeIfImported));
     }
 }
 
@@ -1070,7 +1082,7 @@ impl ProjectInfo {
         if self.can_resolve_call(callee, state) {
             state.mark_unsafe(func);
         } else if !state.is_unsafe(func) {
-            state.mark_unsafe_missing_dep(func);
+            state.mark_unsafe_missing_dep(func, &callee.func);
         }
     }
 
@@ -1256,8 +1268,8 @@ impl ProjectInfo {
             }
         }
 
-        if let Some(safe) = state.function_safety.get(&func).map(|r| *r) {
-            let ret = match safe {
+        if let Some(verdict) = state.function_safety.get(&func).map(|info| info.verdict) {
+            let ret = match verdict {
                 FunctionSafety::Safe => true,
                 FunctionSafety::Unsafe | FunctionSafety::UnsafeMissingDep => false,
                 FunctionSafety::UnsafeIfImported => !is_cross_module_call,
@@ -1309,10 +1321,10 @@ impl ProjectInfo {
                             // if being called from its own module.
                             // NOTE: unsafe-if-imported should not overwrite unsafe, so we check the
                             // cached state first.
-                            let is_already_unsafe = state
-                                .function_safety
-                                .get(&func)
-                                .is_some_and(|v| *v >= FunctionSafety::UnsafeMissingDep);
+                            let is_already_unsafe =
+                                state.function_safety.get(&func).is_some_and(|info| {
+                                    info.verdict >= FunctionSafety::UnsafeMissingDep
+                                });
                             if !is_already_unsafe {
                                 state.mark_unsafe_if_imported(&func);
                                 if is_cross_module_call {

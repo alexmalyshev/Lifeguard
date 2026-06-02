@@ -41,6 +41,35 @@ pub enum FunctionSafety {
     Unsafe,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FunctionSafetyInfo {
+    pub verdict: FunctionSafety,
+    /// The missing cross-library callees that caused an `UnsafeMissingDep`
+    /// verdict. Promotion to `Safe` requires every callee to resolve safe.
+    pub missing_dep_callees: AHashSet<ModuleName>,
+}
+
+impl FunctionSafetyInfo {
+    pub fn new(verdict: FunctionSafety) -> Self {
+        Self {
+            verdict,
+            missing_dep_callees: AHashSet::new(),
+        }
+    }
+
+    pub fn unsafe_missing_dep(callee: ModuleName) -> Self {
+        Self {
+            verdict: FunctionSafety::UnsafeMissingDep,
+            missing_dep_callees: [callee].into_iter().collect(),
+        }
+    }
+
+    pub fn merge(&mut self, other: Self) {
+        self.verdict = self.verdict.max(other.verdict);
+        self.missing_dep_callees.extend(other.missing_dep_callees);
+    }
+}
+
 #[derive(Debug)]
 pub struct ModuleSafety {
     /// Errors that alter how a module should be imported (lazy/eager)
@@ -48,9 +77,9 @@ pub struct ModuleSafety {
     /// Errors that alter if a module should eagerly import its imports
     pub force_imports_eager_overrides: Vec<SafetyError>,
     pub implicit_imports: Vec<ModuleName>,
-    /// Per-function safety verdicts from call graph analysis.
+    /// Per-function safety info from call graph analysis.
     /// Keys are function-local names (e.g., "helper" for `mod.helper`).
-    pub function_safety: HashMap<String, FunctionSafety>,
+    pub function_safety: HashMap<String, FunctionSafetyInfo>,
 }
 
 impl ModuleSafety {
