@@ -14,6 +14,7 @@ use rayon::prelude::*;
 use ruff_text_size::TextRange;
 use serde::Deserialize;
 use serde::Serialize;
+use tracing::debug;
 
 use crate::errors::ErrorKind;
 use crate::errors::SafetyError;
@@ -241,40 +242,55 @@ impl LibraryCache {
         resolved
     }
 
-    /// Iteratively clear false errors: promoting one module's functions to
-    /// `Safe` can make a caller error-free, which in turn promotes its
-    /// functions. Repeat until a round promotes nothing or clears nothing.
+    /// Iteratively clear false errors: promoting the functions of a module
+    /// whose missing imports are all resolved to `Safe` can make a caller
+    /// error-free, which in turn promotes its functions. Repeat until a round
+    /// promotes nothing or clears nothing.
     fn upgrade_missing_dep_functions(
         &mut self,
         module_names: &AHashSet<ModuleName>,
         func_safety_by_module: &mut HashMap<ModuleName, HashMap<String, FunctionSafetyInfo>>,
     ) {
-        while self.promote_safe_module_functions(func_safety_by_module)
-            && self.clear_verified_errors(module_names, func_safety_by_module)
-        {}
+        // Promote to a fixpoint: one promotion can unblock a caller next round.
+        let mut num_promoted = 0;
+        while self.promote_resolved_module_functions(module_names, func_safety_by_module) {
+            num_promoted += 1;
+        }
+        // Clear errors only as a consequence of a promotion (else stay conservative).
+        if num_promoted > 0 {
+            self.clear_verified_errors(module_names, func_safety_by_module);
+        }
+        debug!("{} promotion iterations were made", num_promoted);
     }
 
-    /// Promote every `UnsafeMissingDep` verdict in an already-safe module to
-    /// `Safe`. Returns whether any verdict changed.
-    fn promote_safe_module_functions(
+    /// Promote an `UnsafeMissingDep` verdict to `Safe` only when every callee
+    /// that caused it now resolves to a `Safe` function. A function whose
+    /// missing dep resolves to an *unsafe* function stays unsafe, so transitive
+    /// callers are not wrongly cleared. Returns whether any verdict changed.
+    fn promote_resolved_module_functions(
         &self,
+        module_names: &AHashSet<ModuleName>,
         func_safety_by_module: &mut HashMap<ModuleName, HashMap<String, FunctionSafetyInfo>>,
     ) -> bool {
-        let mut promoted = false;
-        for module in self
-            .modules
-            .iter()
-            .filter(|m| matches!(&m.safety, CachedSafety::Ok(s) if s.is_safe()))
-        {
-            let Some(fs) = func_safety_by_module.get_mut(&module.name) else {
+        let mut to_promote: Vec<(ModuleName, String)> = Vec::new();
+        for module in &self.modules {
+            let Some(fs) = func_safety_by_module.get(&module.name) else {
                 continue;
             };
-            for info in fs
-                .values_mut()
-                .filter(|info| info.verdict == FunctionSafety::UnsafeMissingDep)
+            for (func_name, info) in fs {
+                if can_promote_missing_dep_function(info, module_names, func_safety_by_module) {
+                    to_promote.push((module.name, func_name.clone()));
+                }
+            }
+        }
+
+        let promoted = !to_promote.is_empty();
+        for (module_name, func_name) in to_promote {
+            if let Some(info) = func_safety_by_module
+                .get_mut(&module_name)
+                .and_then(|fs| fs.get_mut(&func_name))
             {
                 info.verdict = FunctionSafety::Safe;
-                promoted = true;
             }
         }
         promoted
@@ -497,6 +513,21 @@ fn is_call_verified_safe(
         .filter_map(|r| func_safety_by_module.get(r))
         .filter_map(|fs| fs.get(func_name))
         .any(|info| info.verdict == FunctionSafety::Safe)
+}
+
+fn can_promote_missing_dep_function(
+    info: &FunctionSafetyInfo,
+    module_names: &AHashSet<ModuleName>,
+    func_safety_by_module: &HashMap<ModuleName, HashMap<String, FunctionSafetyInfo>>,
+) -> bool {
+    info.verdict == FunctionSafety::UnsafeMissingDep
+        // Promote only with positive evidence: a non-empty callee set,
+        // all now verified safe. No record (e.g. a re-export-propagated
+        // verdict) stays conservatively unsafe.
+        && !info.missing_dep_callees.is_empty()
+        && info.missing_dep_callees.iter().all(|callee| {
+            is_call_verified_safe(callee.as_str(), module_names, func_safety_by_module)
+        })
 }
 
 fn resolve_implicit_imports(
@@ -1375,6 +1406,58 @@ mod tests {
     }
 
     #[test]
+    fn test_errors_not_cleared_without_missing_imports() {
+        let safety_map: SafetyMap = DashMap::new();
+        let mut unsafe_safety = ModuleSafety::new();
+        unsafe_safety.add_error(SafetyError::new(
+            ErrorKind::UnknownFunctionCall,
+            "dep.helper()".to_string(),
+            TextRange::default(),
+        ));
+        safety_map.insert(mn("caller"), SafetyResult::Ok(unsafe_safety));
+
+        let mut dep_safety = ModuleSafety::new();
+        dep_safety.function_safety.insert(
+            "helper".to_string(),
+            FunctionSafetyInfo::new(FunctionSafety::Safe),
+        );
+        safety_map.insert(mn("dep"), SafetyResult::Ok(dep_safety));
+
+        let mut import_graph = ImportGraph::new();
+        import_graph.graph.add_node(&mn("caller"));
+        import_graph.graph.add_node(&mn("dep"));
+        import_graph.graph.add_edge(&mn("caller"), &mn("dep"));
+
+        let exports = Exports::empty();
+        let side_effect_imports: SideEffectMap = AHashMap::new();
+        let mut cache =
+            LibraryCache::build(&safety_map, &import_graph, &exports, &side_effect_imports);
+
+        assert!(
+            cache
+                .modules
+                .iter()
+                .find(|m| m.name == mn("caller"))
+                .unwrap()
+                .missing_imports
+                .is_empty(),
+            "no missing imports"
+        );
+
+        cache.resolve_cross_library_errors();
+
+        let caller = cache
+            .modules
+            .iter()
+            .find(|m| m.name == mn("caller"))
+            .unwrap();
+        assert!(
+            !caller.is_safe(),
+            "errors from already-imported modules should not be cleared (conservative)"
+        );
+    }
+
+    #[test]
     fn test_error_cleared_from_ambiguous_import() {
         use crate::test_lib::TestSources;
 
@@ -1416,6 +1499,90 @@ mod tests {
         assert!(
             caller.is_safe(),
             "caller error should be cleared once the ambiguous import feeds into error clearing"
+        );
+    }
+
+    /// A function that is `UnsafeMissingDep` only because of a cross-library
+    /// callee must NOT be promoted to `Safe` if that callee turns out to be
+    /// unsafe once resolved. Otherwise a transitive caller is wrongly cleared.
+    ///
+    ///   dep.g  -> intrinsically unsafe (recursive)
+    ///   mid.f  -> calls dep.g; UnsafeMissingDep while dep is missing
+    ///   top    -> calls f() at module scope
+    #[test]
+    fn test_missing_dep_promotion_blocked_by_unsafe_callee() {
+        use crate::test_lib::TestSources;
+
+        let dep_cache = build_cache(&TestSources::new(&[("dep", "def g():\n    g()\n")]));
+
+        let mut own_cache = build_cache(&TestSources::new(&[
+            ("mid", "from dep import g\ndef f():\n    g()\n"),
+            ("top", "from mid import f\nf()\n"),
+        ]));
+
+        assert!(
+            !own_cache
+                .modules
+                .iter()
+                .find(|m| m.name == mn("top"))
+                .unwrap()
+                .is_safe(),
+            "top unsafe before merge (mid is missing)"
+        );
+
+        own_cache.merge_dep_caches(vec![dep_cache]);
+        own_cache.resolve_cross_library_errors();
+
+        let top = own_cache
+            .modules
+            .iter()
+            .find(|m| m.name == mn("top"))
+            .unwrap();
+        assert!(
+            !top.is_safe(),
+            "top must stay unsafe: importing it runs f() -> unsafe g()"
+        );
+    }
+
+    /// The flip side: when the previously-missing callee resolves to a *safe*
+    /// function, the `UnsafeMissingDep` verdict is still promoted and the
+    /// transitive caller's error is cleared.
+    ///
+    ///   dep.g  -> safe
+    ///   mid.f  -> calls dep.g; UnsafeMissingDep while dep is missing
+    ///   top    -> calls f() at module scope
+    #[test]
+    fn test_missing_dep_promotion_through_safe_callee() {
+        use crate::test_lib::TestSources;
+
+        let dep_cache = build_cache(&TestSources::new(&[("dep", "def g():\n    return 1\n")]));
+
+        let mut own_cache = build_cache(&TestSources::new(&[
+            ("mid", "from dep import g\ndef f():\n    g()\n"),
+            ("top", "from mid import f\nf()\n"),
+        ]));
+
+        assert!(
+            !own_cache
+                .modules
+                .iter()
+                .find(|m| m.name == mn("top"))
+                .unwrap()
+                .is_safe(),
+            "top unsafe before merge (mid is missing)"
+        );
+
+        own_cache.merge_dep_caches(vec![dep_cache]);
+        own_cache.resolve_cross_library_errors();
+
+        let top = own_cache
+            .modules
+            .iter()
+            .find(|m| m.name == mn("top"))
+            .unwrap();
+        assert!(
+            top.is_safe(),
+            "top should be safe: f() only reaches the now-resolved safe g()"
         );
     }
 }
