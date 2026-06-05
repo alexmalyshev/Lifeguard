@@ -549,27 +549,30 @@ impl LifeGuardAnalysis {
     /// and B is a passing module with non-empty failing deps, add B to A's failing
     /// deps so B is eagerly imported.
     pub fn propagate_side_effect_imports(&mut self, side_effect_imports: &SideEffectMap) {
+        let has_failing_deps: AHashSet<ModuleName> = self
+            .output
+            .lazy_eligible
+            .iter()
+            .filter(|entry| !entry.value().is_empty())
+            .map(|entry| *entry.key())
+            .collect();
+
         side_effect_imports
             .par_iter()
             .for_each(|(module_name, se_imports)| {
                 if !self.passing_modules.contains(module_name) {
                     return;
                 }
-                let mut new_deps: SmallSet<ModuleName> = SmallSet::new();
-                for se_import in se_imports {
-                    if let Some(deps) = self.output.lazy_eligible.get(se_import) {
-                        if !deps.is_empty() {
-                            new_deps.insert(*se_import);
-                        }
-                    }
-                }
-                if !new_deps.is_empty() {
-                    self.output
-                        .lazy_eligible
-                        .entry(*module_name)
-                        .or_default()
-                        .extend(new_deps);
-                }
+                self.output
+                    .lazy_eligible
+                    .entry(*module_name)
+                    .or_default()
+                    .extend(
+                        se_imports
+                            .iter()
+                            .filter(|se_import| has_failing_deps.contains(*se_import))
+                            .copied(),
+                    );
             });
     }
 
@@ -1053,6 +1056,71 @@ mod tests {
         // a.child (child of cycle member a) should also get the cycle deps propagated
         let child_deps = lazy_eligible.get(&a_child).unwrap();
         assert!(child_deps.contains(&b));
+    }
+
+    #[test]
+    fn test_side_effect_imports_do_not_observe_same_pass_updates() {
+        let options = Options {
+            verbose_output_path: None,
+            sorted_output: true,
+            main_module: None,
+        };
+        let exports = Exports::empty();
+
+        for iteration in 0..64 {
+            let safety_map = SafetyMap::new();
+            let mut import_graph = ImportGraph::new();
+            let mut side_effect_imports: SideEffectMap = AHashMap::new();
+            let mut chains = Vec::new();
+
+            for chain_idx in 0..16 {
+                let outer = mn(&format!("outer_{iteration}_{chain_idx}"));
+                let middle = mn(&format!("middle_{iteration}_{chain_idx}"));
+                let inner = mn(&format!("inner_{iteration}_{chain_idx}"));
+                let leaf = mn(&format!("leaf_{iteration}_{chain_idx}"));
+
+                import_graph.graph.add_node(&outer);
+                import_graph.graph.add_node(&middle);
+                import_graph.graph.add_node(&inner);
+                import_graph.graph.add_node(&leaf);
+                import_graph.graph.add_edge(&outer, &middle);
+                import_graph.graph.add_edge(&middle, &inner);
+                import_graph.graph.add_edge(&inner, &leaf);
+
+                safety_map.insert(outer, SafetyResult::Ok(ModuleSafety::new()));
+                safety_map.insert(middle, SafetyResult::Ok(ModuleSafety::new()));
+                safety_map.insert(inner, SafetyResult::Ok(ModuleSafety::new()));
+
+                let mut failing = ModuleSafety::new();
+                failing.add_error(make_error(
+                    ErrorKind::UnknownDecoratorCall,
+                    "unknown-decorator-call",
+                    chain_idx,
+                ));
+                safety_map.insert(leaf, SafetyResult::Ok(failing));
+
+                side_effect_imports.insert(middle, [inner].into_iter().collect());
+                side_effect_imports.insert(outer, [middle].into_iter().collect());
+                chains.push((outer, middle, inner));
+            }
+
+            let mut analysis = LifeGuardAnalysis::new(safety_map, import_graph, &exports, &options);
+            analysis.propagate_side_effect_imports(&side_effect_imports);
+
+            for (outer, middle, inner) in chains {
+                let middle_deps = analysis.output.lazy_eligible.get(&middle).unwrap();
+                assert!(
+                    middle_deps.contains(&inner),
+                    "{middle} should be guarded by {inner}",
+                );
+
+                let outer_deps = analysis.output.lazy_eligible.get(&outer).unwrap();
+                assert!(
+                    !outer_deps.contains(&middle),
+                    "{outer} should not observe side-effect deps added to {middle} during the same propagation pass",
+                );
+            }
+        }
     }
 
     // ---- build_re_export_map tests ----
