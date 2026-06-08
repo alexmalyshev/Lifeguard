@@ -288,22 +288,32 @@ impl LibraryCache {
         func_safety_by_module: &mut HashMap<ModuleName, HashMap<String, FunctionSafetyInfo>>,
         globally_safe_funcs: &mut AHashSet<String>,
     ) -> bool {
-        let mut to_promote: Vec<(ModuleName, String)> = Vec::new();
-        for module in &self.modules {
-            let Some(fs) = func_safety_by_module.get(&module.name) else {
-                continue;
-            };
-            for (func_name, info) in fs {
-                if can_promote_missing_dep_function(
-                    info,
-                    module_names,
-                    func_safety_by_module,
-                    globally_safe_funcs,
-                ) {
-                    to_promote.push((module.name, func_name.clone()));
-                }
-            }
-        }
+        let to_promote: Vec<(ModuleName, String)> = {
+            // Reborrow as shared for parallel access.
+            let func_safety_by_module = &*func_safety_by_module;
+            let globally_safe_funcs = &*globally_safe_funcs;
+
+            self.modules
+                .par_iter()
+                .filter_map(|module| {
+                    func_safety_by_module
+                        .get(&module.name)
+                        .map(|fs| (module.name, fs))
+                })
+                .flat_map_iter(|(name, fs)| {
+                    fs.iter()
+                        .filter(move |(_, info)| {
+                            can_promote_missing_dep_function(
+                                info,
+                                module_names,
+                                func_safety_by_module,
+                                globally_safe_funcs,
+                            )
+                        })
+                        .map(move |(func_name, _)| (name, func_name.clone()))
+                })
+                .collect()
+        };
 
         let promoted = !to_promote.is_empty();
         for (module_name, func_name) in to_promote {
@@ -327,27 +337,29 @@ impl LibraryCache {
         func_safety_by_module: &HashMap<ModuleName, HashMap<String, FunctionSafetyInfo>>,
         globally_safe_funcs: &AHashSet<String>,
     ) -> bool {
-        let mut cleared = false;
-        for module in &mut self.modules {
-            if let CachedSafety::Ok(ref mut safety) = module.safety {
-                cleared |= retain_unverified_errors(safety, |func_name| {
+        self.modules
+            .par_iter_mut()
+            .map(|module| {
+                let CachedSafety::Ok(ref mut safety) = module.safety else {
+                    return false;
+                };
+                retain_unverified_errors(safety, |func_name| {
                     is_call_verified_safe_indexed(
                         func_name,
                         module_names,
                         func_safety_by_module,
                         globally_safe_funcs,
                     )
-                });
-            }
-        }
-        cleared
+                })
+            })
+            .reduce(|| false, |any_cleared, cleared| any_cleared || cleared)
     }
 
     /// Resolve missing imports against the merged cache and selectively clear
     /// false errors using per-function safety verdicts.
     pub fn resolve_cross_library_errors(&mut self) {
         let module_names: AHashSet<ModuleName> = self.modules.iter().map(|m| m.name).collect();
-        let mut ambiguous_resolved = self.resolve_ambiguous_imports(&module_names);
+        let ambiguous_resolved = self.resolve_ambiguous_imports(&module_names);
 
         self.propagate_re_export_safety();
 
@@ -357,15 +369,15 @@ impl LibraryCache {
                 .map(|m| (m.name, std::mem::take(&mut m.function_safety)))
                 .collect();
 
-        for module in &mut self.modules {
+        self.modules.par_iter_mut().for_each(|module| {
             if let CachedSafety::Ok(ref mut safety) = module.safety {
                 resolve_implicit_imports(&mut safety.implicit_imports, &module_names);
             }
 
-            let from_ambiguous = ambiguous_resolved.remove(&module.name);
+            let from_ambiguous = ambiguous_resolved.get(&module.name);
 
             if module.missing_imports.is_empty() && from_ambiguous.is_none() {
-                continue;
+                return;
             }
 
             let mut still_missing: AHashSet<ModuleName> =
@@ -374,7 +386,7 @@ impl LibraryCache {
                 AHashSet::with_capacity(module.missing_imports.len());
 
             if let Some(from_ambiguous) = from_ambiguous {
-                resolved_modules.extend(from_ambiguous);
+                resolved_modules.extend(from_ambiguous.iter().copied());
             }
 
             for missing in module.missing_imports.drain() {
@@ -393,7 +405,7 @@ impl LibraryCache {
                     is_call_verified_safe(func_name, &resolved_modules, &func_safety_by_module)
                 });
             }
-        }
+        });
 
         self.upgrade_missing_dep_functions(&module_names, &mut func_safety_by_module);
 
@@ -802,5 +814,101 @@ impl CachedExports {
         self.re_exports.extend(other.re_exports);
         self.all.extend(other.all);
         self.return_types.extend(other.return_types);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rayon::ThreadPoolBuilder;
+
+    use super::*;
+
+    #[test]
+    fn clear_verified_errors_processes_every_module() {
+        let module_a = ModuleName::from_str("test.module_a");
+        let module_b = ModuleName::from_str("test.module_b");
+
+        let mut cache = LibraryCache {
+            modules: vec![
+                CachedModule {
+                    name: module_a,
+                    safety: CachedSafety::Ok(CachedModuleSafety {
+                        errors: vec![CachedError {
+                            kind: ErrorKind::UnknownFunctionCall,
+                            metadata: "helper()".to_owned(),
+                        }],
+                        force_imports_eager_overrides: Vec::new(),
+                        implicit_imports: Vec::new(),
+                    }),
+                    imports: AHashSet::new(),
+                    missing_imports: AHashSet::new(),
+                    ambiguous_imports: AHashSet::new(),
+                    side_effect_imports: AHashSet::new(),
+                    function_safety: HashMap::new(),
+                },
+                CachedModule {
+                    name: module_b,
+                    safety: CachedSafety::Ok(CachedModuleSafety {
+                        errors: vec![CachedError {
+                            kind: ErrorKind::UnknownFunctionCall,
+                            metadata: "helper()".to_owned(),
+                        }],
+                        force_imports_eager_overrides: Vec::new(),
+                        implicit_imports: Vec::new(),
+                    }),
+                    imports: AHashSet::new(),
+                    missing_imports: AHashSet::new(),
+                    ambiguous_imports: AHashSet::new(),
+                    side_effect_imports: AHashSet::new(),
+                    function_safety: HashMap::new(),
+                },
+            ],
+            exports: CachedExports {
+                definitions: Vec::new(),
+                re_exports: Vec::new(),
+                all: Vec::new(),
+                return_types: Vec::new(),
+            },
+        };
+
+        let module_names: AHashSet<ModuleName> = [module_a, module_b].into_iter().collect();
+        let func_safety_by_module = HashMap::from([
+            (
+                module_a,
+                HashMap::from([(
+                    "helper".to_owned(),
+                    FunctionSafetyInfo::new(FunctionSafety::Safe),
+                )]),
+            ),
+            (
+                module_b,
+                HashMap::from([(
+                    "helper".to_owned(),
+                    FunctionSafetyInfo::new(FunctionSafety::Safe),
+                )]),
+            ),
+        ]);
+        let globally_safe_funcs: AHashSet<String> = ["helper".to_owned()].into_iter().collect();
+
+        let cleared = ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .expect("should build test thread pool")
+            .install(|| {
+                cache.clear_verified_errors(
+                    &module_names,
+                    &func_safety_by_module,
+                    &globally_safe_funcs,
+                )
+            });
+
+        assert!(
+            cleared,
+            "expected at least one verified error to be removed"
+        );
+        assert!(
+            cache.modules.iter().all(CachedModule::is_safe),
+            "all modules should have their verified errors cleared",
+        );
     }
 }
