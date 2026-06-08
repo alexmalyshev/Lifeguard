@@ -26,8 +26,14 @@ const SAFE_FUNCTIONS_ARRAY: &[&str] = &[
     // Decorators for caching values.  These are akin to functools.cache().
     "f3.utils.decorators.cache",
     "libfb.py.decorators.lazy_property",
+    "libfb.py.decorators.memoize_fast",
+    "libfb.py.decorators.memoize_fast_0",
     "libfb.py.decorators.memoize_forever",
     "libfb.py.decorators.memoize_timed",
+    "libfb.py.memoize.memoize_fast",
+    "libfb.py.memoize.memoize_fast_0",
+    "psutil._common.memoize",
+    "psutil._common.memoize_when_activated",
     // Functions that use the ABCMeta registry, which is hard to analyze but it is safe.
     "collections.abc.Mapping.register",
     "collections.abc.Sequence.register",
@@ -106,10 +112,14 @@ const SAFE_FUNCTIONS_ARRAY: &[&str] = &[
     "dns.name.IDNA2003Codec",
     "dns.name.IDNA2008Codec",
     "dns.name.Name",
+    "google.auth._helpers.copy_docstring",
     // Pure-wrapper deprecation decorators. At decoration time they only build a
     // closure that emits a DeprecationWarning at call time; no module-level
     // registry, no I/O. Same shape as langchain_core._api.deprecation.deprecated.
     "markdown.util.deprecated",
+    // Pure functools.wraps wrapper. All tracing work happens inside the async
+    // wrapper at call time, never at decoration time.
+    "model_context_protocol.common.decorators.mcp_client_connect_decorator.mcp_client_connect",
     "nltk.internals.deprecated",
     "sympy.utilities.decorator.deprecated",
     // sandcastle test gate: at decoration time it either returns the function
