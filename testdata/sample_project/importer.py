@@ -6,3 +6,5 @@
 # pyre-unsafe
 from safer_lazy_imports.lifeguard.testdata.sample_project.safe_module import greet
 from safer_lazy_imports.lifeguard.testdata.sample_project.unsafe_module import helper
+
+__all__ = ["greet", "helper"]
