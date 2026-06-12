@@ -13,6 +13,7 @@ pub mod cache;
 pub mod class;
 pub mod commands;
 pub mod config;
+pub mod csr_graph;
 pub mod cursor;
 pub mod debug;
 pub mod effects;

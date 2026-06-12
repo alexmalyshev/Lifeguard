@@ -26,6 +26,7 @@ use crate::class::Class;
 use crate::class::ClassTable;
 use crate::class::FieldKind;
 use crate::config::AnalysisConfig;
+use crate::csr_graph::CsrGraph;
 use crate::effects::Effect;
 use crate::effects::EffectData;
 use crate::effects::EffectKind;
@@ -905,6 +906,21 @@ impl ProjectInfo {
         let state = GlobalAnalysisState::new();
         state.init_safety_map(&self.analysis_map);
 
+        // Determinism fix: compute all function/constructor safety verdicts up
+        // front, BEFORE the module-scope error pass, so that pass only ever reads
+        // a complete, order-independent verdict cache.
+        if caching == CachingMode::Enabled {
+            time("    Marking recursive functions", || {
+                self.mark_recursive_functions_unsafe(&state)
+            });
+            time("    Precompute constructor safety", || {
+                self.precompute_constructor_safety(&state)
+            });
+            time("    Precompute function safety", || {
+                self.precompute_function_safety(&state)
+            });
+        }
+
         self.analysis_map.par_iter().for_each(|(mod_name, result)| {
             let defs = &result.definitions;
             for scope in &defs.eager_scopes {
@@ -928,12 +944,63 @@ impl ProjectInfo {
             }
         });
 
-        if caching == CachingMode::Enabled {
-            self.precompute_constructor_safety(&state);
-            self.precompute_function_safety(&state);
+        state.into_safety_map(caching)
+    }
+
+    /// Deterministically mark every function/class that participates in a call cycle as `Unsafe`,
+    /// before the memoized call-graph traversal runs.
+    ///
+    /// Marking the whole cycle up front is the order-free equivalent of "recursive calls are
+    /// unsafe", and leaves the remaining call graph acyclic so memoized verdicts become independent
+    /// of visitation order.
+    fn mark_recursive_functions_unsafe(&self, state: &GlobalAnalysisState) {
+        let class_names: Vec<ModuleName> = self.classes.par_keys().copied().collect();
+        let n_nodes = self.functions.len() + class_names.len();
+        let mut indexes: AHashMap<ModuleName, u32> = AHashMap::with_capacity(n_nodes);
+        let mut names: Vec<ModuleName> = Vec::with_capacity(n_nodes);
+        for name in self.functions.keys().chain(class_names.iter()) {
+            indexes.entry(*name).or_insert_with(|| {
+                names.push(*name);
+                (names.len() - 1) as u32
+            });
         }
 
-        state.into_safety_map(caching)
+        // Collect call-graph edges in parallel. Edge order does not affect the SCC
+        // result, so the nondeterministic cross-thread merge order is fine.
+        let indexes = &indexes;
+        // Runnable-call edges out of each function scope (function/method/
+        // decorator/constructor calls).
+        let mut edges: Vec<(u32, u32)> = self
+            .functions
+            .par_iter()
+            .flat_map_iter(|(func, _)| {
+                let from = indexes[func];
+                self.effect_table
+                    .get(func)
+                    .into_iter()
+                    .flatten()
+                    .filter(|e| e.kind.is_runnable())
+                    .filter_map(move |e| indexes.get(&e.name).map(|&to| (from, to)))
+            })
+            .collect();
+        // Constructor dispatch edges, mirroring check_constructor_call.
+        let ctor_edges: Vec<(u32, u32)> = class_names
+            .par_iter()
+            .flat_map_iter(|cls_name| {
+                let from = indexes[cls_name];
+                self.constructor_methods(*cls_name)
+                    .filter_map(move |m| indexes.get(&m).map(|&to| (from, to)))
+            })
+            .collect();
+        edges.extend(ctor_edges);
+
+        let in_cycle = CsrGraph::from_edges(n_nodes, &edges).nodes_in_cycles();
+
+        for (i, is_cyclic) in in_cycle.iter().enumerate() {
+            if *is_cyclic {
+                state.mark_unsafe(&names[i]);
+            }
+        }
     }
 
     fn precompute_constructor_safety(&self, state: &GlobalAnalysisState) {
@@ -1184,25 +1251,29 @@ impl ProjectInfo {
         Ok(ret)
     }
 
+    /// The functions a constructor call to `cls_name` may dispatch to, in the
+    /// order `check_constructor_call` checks them: the metaclass `__new__` and
+    /// `__init__` (if the class has a metaclass), then `__init__` and
+    /// `__post_init__` on the class itself (the latter is called by the
+    /// dataclass-generated `__init__`).
+    /// TODO: Look up `__init__` in the MRO.
+    fn constructor_methods(&self, cls_name: ModuleName) -> impl Iterator<Item = ModuleName> {
+        let metaclass = self.classes.lookup(&cls_name).and_then(|cls| cls.metaclass);
+        metaclass
+            .into_iter()
+            .flat_map(|mcls| [mcls.append_str("__new__"), mcls.append_str("__init__")])
+            .chain([
+                cls_name.append_str("__init__"),
+                cls_name.append_str("__post_init__"),
+            ])
+    }
+
     fn check_constructor_call(&self, call: &Call, state: &GlobalAnalysisState) -> Result<bool> {
         let mut ret = true;
-        let cls_name = call.func;
-        // Check the metaclass
-        let cls = self.classes.lookup(&cls_name).unwrap();
-        if let Some(mcls) = cls.metaclass {
-            let mut mcls_new = call.clone_with_name(mcls.append_str("__new__"));
-            ret &= self.check_call_body(&mut mcls_new, state)?;
-            let mut mcls_init = call.clone_with_name(mcls.append_str("__init__"));
-            ret &= self.check_call_body(&mut mcls_init, state)?;
+        for method in self.constructor_methods(call.func) {
+            let mut method_call = call.clone_with_name(method);
+            ret &= self.check_call_body(&mut method_call, state)?;
         }
-        // Check __init__
-        // TODO: Look up __init__ in the MRO
-        let mut init_call = call.clone_with_name(cls_name.append_str("__init__"));
-        ret &= self.check_call_body(&mut init_call, state)?;
-        // Check __post_init__ (called by dataclass-generated __init__)
-        let mut post_init_call = call.clone_with_name(cls_name.append_str("__post_init__"));
-        ret &= self.check_call_body(&mut post_init_call, state)?;
-
         Ok(ret)
     }
 
