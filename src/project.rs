@@ -27,6 +27,7 @@ use crate::class::ClassTable;
 use crate::class::FieldKind;
 use crate::config::AnalysisConfig;
 use crate::csr_graph::CsrGraph;
+use crate::effects::CallData;
 use crate::effects::Effect;
 use crate::effects::EffectData;
 use crate::effects::EffectKind;
@@ -36,6 +37,7 @@ use crate::errors::SafetyError;
 use crate::exports::Exports;
 use crate::imports::ImportGraph;
 use crate::module_effects::ModuleImportsMap;
+use crate::module_info::DefinitionTable;
 use crate::module_parser::ParsedModule;
 pub use crate::module_safety::FunctionSafety;
 use crate::module_safety::FunctionSafetyInfo;
@@ -1277,6 +1279,70 @@ impl ProjectInfo {
         Ok(ret)
     }
 
+    /// Checks if
+    /// - `eff` is a method call on a parameter (i.e. the function potentially mutates one of
+    ///   its parameters)
+    /// - `call_data` contains an imported variable
+    /// - the called function specifically mutates the passed-in imported variable
+    ///   OR we cannot do precise arg matching and therefore fall back to assuming it's a potential
+    ///   mutation
+    fn mutated_param_receives_imported_arg(
+        call_data: &CallData,
+        callee: &ModuleName,
+        eff: &Effect,
+        defs: Option<&DefinitionTable>,
+    ) -> bool {
+        if eff.kind != EffectKind::ParamMethodCall {
+            return false;
+        }
+        let param_name = eff.name.as_str();
+
+        // Positional args: does the mutated param's index match an unsafe arg?
+        if let Some(param_idx) = defs.and_then(|d| d.get_param_index(callee, param_name)) {
+            if call_data.has_unsafe_arg_index(param_idx) {
+                return true;
+            }
+        }
+
+        // Keyword args: does the mutated param's name match an unsafe keyword?
+        if call_data.has_unsafe_keywords() {
+            if call_data.has_unsafe_keyword(param_name) {
+                return true;
+            }
+            if call_data.has_precise_keyword_tracking() {
+                return false;
+            }
+        }
+
+        // No positional/keyword match could be pinpointed; if the call has an
+        // unsafe arg we couldn't track precisely, match conservatively.
+        !call_data.has_any_tracked_args()
+    }
+
+    /// Whether `call_effect` passes an imported variable to a parameter that the
+    /// callee mutates, i.e. running this call mutates imported state.
+    fn call_mutates_imported_arg(
+        &self,
+        call_effect: &Effect,
+        callee: &ModuleName,
+        callee_effs: &[Effect],
+    ) -> bool {
+        let EffectData::Call(ref call_data) = call_effect.data else {
+            return false;
+        };
+        if !call_data.has_unsafe_args() {
+            return false;
+        }
+        let callee_module = self.functions.get(callee).copied().unwrap_or(*callee);
+        let defs = self
+            .analysis_map
+            .get(&callee_module)
+            .map(|m| &m.definitions);
+        callee_effs
+            .iter()
+            .any(|eff| Self::mutated_param_receives_imported_arg(call_data, callee, eff, defs))
+    }
+
     fn check_call_params(&self, call: &Call, effs: &[Effect], state: &GlobalAnalysisState) {
         let EffectData::Call(ref call_data) = call.effect.data else {
             return;
@@ -1290,35 +1356,7 @@ impl ProjectInfo {
         let defs = self.analysis_map.get(&func_module).map(|m| &m.definitions);
 
         for eff in effs {
-            if eff.kind != EffectKind::ParamMethodCall {
-                continue;
-            }
-            let param_name = eff.name.as_str();
-
-            // Check positional args: does the mutated param's index match an unsafe arg?
-            if let Some(param_idx) = defs.and_then(|d| d.get_param_index(func, param_name)) {
-                if call_data.has_unsafe_arg_index(param_idx) {
-                    let err =
-                        SafetyError::new_from_effect(ErrorKind::ImportedVarArgument, call.effect);
-                    state.add_error_to_module(call.caller_module, err);
-                    continue;
-                }
-            }
-
-            // Check keyword args: does the mutated param's name match an unsafe keyword?
-            if call_data.has_unsafe_keywords() {
-                if call_data.has_unsafe_keyword(param_name) {
-                    let err =
-                        SafetyError::new_from_effect(ErrorKind::ImportedVarArgument, call.effect);
-                    state.add_error_to_module(call.caller_module, err);
-                }
-                if call_data.has_precise_keyword_tracking() {
-                    continue;
-                }
-            }
-
-            // Fallback: no positional or keyword match resolved, use coarse matching
-            if !call_data.has_any_tracked_args() {
+            if Self::mutated_param_receives_imported_arg(call_data, func, eff, defs) {
                 let err = SafetyError::new_from_effect(ErrorKind::ImportedVarArgument, call.effect);
                 state.add_error_to_module(call.caller_module, err);
             }
@@ -1362,22 +1400,30 @@ impl ProjectInfo {
                     state.mark_unsafe(&func);
                     ret = false;
                 } else if eff.kind.is_runnable() {
+                    // If we pass an imported variable to a function that mutates it, mark the
+                    // current function as unsafe.
+                    if let Some(callee_effs) = self.effect_table.get(&eff.name) {
+                        if self.call_mutates_imported_arg(eff, &eff.name, callee_effs) {
+                            state.mark_unsafe(&func);
+                            ret = false;
+                        }
+                    }
                     if call.stack.contains(&eff.name) {
                         // We have a recursive function call; mark it unsafe
                         state.mark_unsafe(&func);
                         ret = false;
                     } else {
                         call.stack.push(eff.name);
-                        // During the module-scope pass, thread the importing module
-                        // so `UnsafeIfImported` callees are judged against "is this
-                        // module safe to import". During verdict precompute
-                        // (is_module_scope == false), judge callees against the
-                        // *immediate* caller (this function's module) so the cached
-                        // verdict is independent of which entry point reached it.
-                        let child_caller_module = if call.is_module_scope {
-                            call.caller_module
-                        } else {
+                        let child_caller_module = if !call.is_module_scope {
+                            // When precomputing function safety, the child module is the immediate
+                            // caller, so that we can inherit the "unsafe if imported" status
+                            // independent of the original entry point.
                             call_module
+                        } else {
+                            // When checking module safety, thread the entry module through all
+                            // calls, so that we can resolve the "unsafe if imported" effects from
+                            // the previous pass with the correct value of "if imported".
+                            call.caller_module
                         };
                         let mut child_call = Call {
                             caller_module: child_caller_module,

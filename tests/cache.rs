@@ -596,6 +596,53 @@ mod tests {
     }
 
     #[test]
+    fn test_param_mutation_through_function_is_unsafe() {
+        // `sink` mutates its parameter (fine in isolation -> Safe). `f` calls
+        // `sink(other)`, passing the imported module `other`, so running `f`
+        // mutates imported state at import time -> `f` is Unsafe. `app` calls `f`
+        // at module scope, so importing `app` runs that mutation -> `app` fails.
+        //
+        // This is detected as a property of `f`'s verdict (not only via the
+        // module-scope call-tree traversal, which short-circuits on cached
+        // verdicts), so the transitive case is flagged deterministically rather
+        // than being a false-safe.
+        let cache = build_cache(&TestSources::new(&[
+            ("other", "value = 1\n"),
+            (
+                "m",
+                "import other\n\
+                 def sink(x):\n\
+                 \x20   x.attr = 1\n\
+                 def f():\n\
+                 \x20   sink(other)\n",
+            ),
+            (
+                "app",
+                "from m import f\n\
+                 f()\n",
+            ),
+        ]));
+
+        let m = cache.modules.iter().find(|x| x.name == mn("m")).unwrap();
+        assert_eq!(
+            m.function_safety.get("sink").map(|i| i.verdict),
+            Some(FunctionSafety::Safe),
+            "sink mutates its own parameter, which is safe in isolation",
+        );
+        assert_eq!(
+            m.function_safety.get("f").map(|i| i.verdict),
+            Some(FunctionSafety::Unsafe),
+            "f passes an imported var to a mutated parameter, mutating imported state",
+        );
+
+        let app = cache.modules.iter().find(|x| x.name == mn("app")).unwrap();
+        assert!(
+            !app.is_safe(),
+            "app calls f at import time, so importing app runs the mutation",
+        );
+    }
+
+    #[test]
     fn test_resolve_to_known_module_exact_and_parent() {
         let known = [mn("foo"), mn("bar.baz")].into_iter().collect();
 
