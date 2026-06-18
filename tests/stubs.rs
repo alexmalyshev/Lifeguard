@@ -260,6 +260,19 @@ class C:
     }
 
     #[test]
+    fn test_asyncio_lock_constructors_safe() {
+        let code = r#"
+import asyncio
+
+lock = asyncio.Lock()
+event = asyncio.Event()
+condition = asyncio.Condition()
+semaphore = asyncio.Semaphore()
+"#;
+        check(code);
+    }
+
+    #[test]
     fn test_mcp_client_connect_safe() {
         // Regression test for the mcp_client_connect override in manual_override.rs.
         // It is a pure functools.wraps wrapper; all tracing work happens inside the
